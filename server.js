@@ -1,223 +1,199 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import mysql from "mysql2";
+import mysql from "mysql2/promise";
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.use(cors());
 app.use(express.json());
 
-const db = mysql.createConnection({
-  host: "sql10.freesqldatabase.com",
-  user: "sql10803847",
-  password: "M4VW7jWnRg",
-  database: "sql10803847",
+// ─────────────────────────────────────────────
+// BASE DE DATOS
+// ─────────────────────────────────────────────
+const pool = mysql.createPool({
+  host:               process.env.DB_HOST,
+  user:               process.env.DB_USER,
+  password:           process.env.DB_PASSWORD,
+  database:           process.env.DB_NAME,
+  port:               Number(process.env.DB_PORT) || 3306,
+  waitForConnections: true,
+  connectionLimit:    10,
 });
 
-db.connect((err) => {
-  if (err) {
-    console.error("Error al conectar a MySQL:", err.message);
-  } else {
-    console.log("Conectado a la base de datos MySQL");
-  }
-});
+const db = async (sql, params = []) => {
+  const [rows] = await pool.execute(sql, params);
+  return rows;
+};
 
+// ─────────────────────────────────────────────
+// HELPER — evita repetir try/catch en cada ruta
+// ─────────────────────────────────────────────
+const asyncHandler = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next);
 
+// ─────────────────────────────────────────────
+// HEALTH CHECK
+// ─────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.send("Servidor funcionando 😎");
+  res.json({ servidor: "funcionando", status: "ok" });
 });
 
+// ═════════════════════════════════════════════
+// USUARIOS
+// ═════════════════════════════════════════════
 
-app.get("/usuarios", (req, res) => {
-  db.query("SELECT * FROM usuarios", (err, result) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(result);
-  });
-});
+// GET /usuarios
+app.get("/usuarios", asyncHandler(async (req, res) => {
+  const usuarios = await db("SELECT id, usuario, created_at FROM usuarios");
+  res.json(usuarios);
+}));
 
-
-app.post("/login", (req, res) => {
+// POST /registro
+// Body: { usuario, password }
+app.post("/registro", asyncHandler(async (req, res) => {
   const { usuario, password } = req.body;
 
   if (!usuario || !password)
     return res.status(400).json({ error: "Faltan datos" });
 
-  const query = "SELECT * FROM usuarios WHERE usuario = ? AND password = ?";
-  db.query(query, [usuario, password], (err, result) => {
-    if (err) return res.status(500).json({ error: "Error en el servidor" });
+  const existe = await db("SELECT id FROM usuarios WHERE usuario = ?", [usuario]);
+  if (existe.length)
+    return res.status(400).json({ error: "El usuario ya existe" });
 
-    if (result.length > 0) {
-      res.json({ mensaje: "Login exitoso", user: result[0] });
-    } else {
-      res.status(401).json({ error: "Usuario o contraseña incorrectos" });
-    }
-  });
-});
+  const result = await db(
+    "INSERT INTO usuarios (usuario, password) VALUES (?, ?)",
+    [usuario, password]
+  );
 
+  res.json({ mensaje: "Usuario registrado con éxito", idUsuario: result.insertId });
+}));
 
-app.post("/registro", (req, res) => {
+// POST /login
+// Body: { usuario, password }
+app.post("/login", asyncHandler(async (req, res) => {
   const { usuario, password } = req.body;
 
   if (!usuario || !password)
     return res.status(400).json({ error: "Faltan datos" });
 
+  const [user] = await db(
+    "SELECT id, usuario FROM usuarios WHERE usuario = ? AND password = ?",
+    [usuario, password]
+  );
 
-  const checkQuery = "SELECT * FROM usuarios WHERE usuario = ?";
-  db.query(checkQuery, [usuario], (err, result) => {
-    if (err) return res.status(500).json({ error: "Error en el servidor" });
+  if (!user)
+    return res.status(401).json({ error: "Usuario o contraseña incorrectos" });
 
-    if (result.length > 0) {
-      return res.status(400).json({ error: "El usuario ya existe 🚫" });
-    }
+  res.json({ mensaje: "Login exitoso", user });
+}));
 
-    
-    const queryRegistro = "INSERT INTO registro_usuarios (usuario, password) VALUES (?, ?)";
-    db.query(queryRegistro, [usuario, password], (err1) => {
-      if (err1) return res.status(500).json({ error: "Error al registrar" });
+// ═════════════════════════════════════════════
+// TAREAS
+// ═════════════════════════════════════════════
 
-      
-      const queryUsuario = "INSERT INTO usuarios (usuario, password) VALUES (?, ?)";
-      db.query(queryUsuario, [usuario, password], (err2, result2) => {
-        if (err2) {
-          console.error("Error al insertar en usuarios:", err2.message);
-          return res.status(500).json({ error: "Error al registrar usuario" });
-        }
-
-        res.json({
-          mensaje: "Usuario registrado con éxito",
-          idUsuario: result2.insertId,
-        });
-      });
-    });
-  });
-});
-
-app.get("/tareas", (req, res) => {
-  const query = `
-    SELECT t.*, u.usuario 
+// GET /tareas  — todas las tareas con nombre de usuario
+app.get("/tareas", asyncHandler(async (req, res) => {
+  const tareas = await db(`
+    SELECT t.*, u.usuario
     FROM tareas t
     LEFT JOIN usuarios u ON t.id_usuario = u.id
     ORDER BY t.fecha_creacion DESC
-  `;
+  `);
+  res.json(tareas);
+}));
 
-  db.query(query, (err, result) => {
-    if (err) {
-      console.error("Error al obtener tareas:", err.message);
-      return res.status(500).json({ error: "Error al obtener las tareas" });
-    }
-    res.json(result);
-  });
-});
+// GET /tareas/:id_usuario  — tareas de un usuario específico
+app.get("/tareas/:id_usuario", asyncHandler(async (req, res) => {
+  const tareas = await db(
+    "SELECT * FROM tareas WHERE id_usuario = ? ORDER BY fecha_creacion DESC",
+    [req.params.id_usuario]
+  );
+  res.json(tareas);
+}));
 
-
-
-app.get("/tareas/:id_usuario", (req, res) => {
-  const { id_usuario } = req.params;
-
-  const query = `
-    SELECT * FROM tareas 
-    WHERE id_usuario = ? 
-    ORDER BY fecha_creacion DESC
-  `;
-
-  db.query(query, [id_usuario], (err, result) => {
-    if (err) {
-      console.error("Error al obtener tareas del usuario:", err.message);
-      return res.status(500).json({ error: "Error al obtener las tareas del usuario" });
-    }
-
-    res.json(result);
-  });
-});
-
-
-
-app.post("/tareas", (req, res) => {
+// POST /tareas
+// Body: { titulo, id_usuario, descripcion?, estado?, prioridad?, fecha_vencimiento? }
+app.post("/tareas", asyncHandler(async (req, res) => {
   const { titulo, descripcion, estado, prioridad, fecha_vencimiento, id_usuario } = req.body;
 
-  if (!titulo || !id_usuario) {
+  if (!titulo || !id_usuario)
     return res.status(400).json({ error: "El título y el id_usuario son obligatorios" });
-  }
 
-  const query = `
-    INSERT INTO tareas (titulo, descripcion, estado, prioridad, fecha_vencimiento, id_usuario)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `;
-
-  db.query(
-    query,
-    [titulo, descripcion, estado || 'pendiente', prioridad || 'media', fecha_vencimiento || null, id_usuario],
-    (err, result) => {
-      if (err) {
-        console.error("Error al insertar tarea:", err.message);
-        return res.status(500).json({ error: "Error al crear la tarea" });
-      }
-
-      res.json({
-        mensaje: "Tarea creada con éxito",
-        idTarea: result.insertId,
-      });
-    }
+  const result = await db(
+    `INSERT INTO tareas (titulo, descripcion, estado, prioridad, fecha_vencimiento, id_usuario)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [titulo, descripcion || null, estado || "pendiente",
+     prioridad || "media", fecha_vencimiento || null, id_usuario]
   );
-});
 
+  res.json({ mensaje: "Tarea creada con éxito", idTarea: result.insertId });
+}));
 
-app.put("/tareas/:id", (req, res) => {
-  const { id } = req.params;
+// PUT /tareas/:id
+// Body: { descripcion?, estado? }
+app.put("/tareas/:id", asyncHandler(async (req, res) => {
   const { descripcion, estado } = req.body;
 
-  if (!descripcion && !estado) {
+  if (!descripcion && !estado)
     return res.status(400).json({ error: "Se requiere al menos un campo para actualizar" });
-  }
 
   const campos = [];
   const valores = [];
 
-  if (descripcion) {
-    campos.push("descripcion = ?");
-    valores.push(descripcion);
+  if (descripcion) { campos.push("descripcion = ?"); valores.push(descripcion); }
+  if (estado)      { campos.push("estado = ?");      valores.push(estado); }
+
+  valores.push(req.params.id);
+
+  const result = await db(
+    `UPDATE tareas SET ${campos.join(", ")} WHERE id = ?`,
+    valores
+  );
+
+  if (result.affectedRows === 0)
+    return res.status(404).json({ error: "Tarea no encontrada" });
+
+  res.json({ mensaje: "Tarea actualizada con éxito" });
+}));
+
+// DELETE /tareas/:id
+app.delete("/tareas/:id", asyncHandler(async (req, res) => {
+  const result = await db("DELETE FROM tareas WHERE id = ?", [req.params.id]);
+
+  if (result.affectedRows === 0)
+    return res.status(404).json({ error: "Tarea no encontrada" });
+
+  res.json({ mensaje: "Tarea eliminada correctamente" });
+}));
+
+// ─────────────────────────────────────────────
+// 404 Y MANEJADOR GLOBAL DE ERRORES
+// ─────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ error: `Ruta ${req.method} ${req.path} no existe` });
+});
+
+app.use((err, req, res, next) => {
+  console.error(`[${new Date().toISOString()}]`, err.message);
+  res.status(500).json({ error: "Error interno del servidor" });
+});
+
+// ─────────────────────────────────────────────
+// ARRANQUE CON VERIFICACIÓN DE DB
+// ─────────────────────────────────────────────
+const start = async () => {
+  try {
+    await pool.query("SELECT 1");
+    console.log("✓ Conectado a MySQL");
+    app.listen(PORT, () => {
+      console.log(`✓ Servidor en http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error("✗ No se pudo conectar a MySQL:", err.message);
+    process.exit(1);
   }
+};
 
-  if (estado) {
-    campos.push("estado = ?");
-    valores.push(estado);
-  }
-
-  valores.push(id);
-
-  const query = `UPDATE tareas SET ${campos.join(", ")} WHERE id = ?`;
-
-  db.query(query, valores, (err, result) => {
-    if (err) {
-      console.error("Error al actualizar tarea:", err.message);
-      return res.status(500).json({ error: "Error al actualizar la tarea" });
-    }
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Tarea no encontrada" });
-    }
-
-    res.json({ mensaje: "Tarea actualizada con éxito" });
-  });
-});
-
-
-app.delete("/tareas/:id", (req, res) => {
-  const { id } = req.params;
-  const query = "DELETE FROM tareas WHERE id = ?";
-
-  db.query(query, [id], (err, result) => {
-    if (err) {
-      console.error("Error al eliminar tarea:", err);
-      return res.status(500).json({ error: "Error al eliminar tarea" });
-    }
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Tarea no encontrada" });
-    }
-
-    res.json({ mensaje: "Tarea eliminada correctamente" });
-  });
-});
-app.listen(3000, () => {
-  console.log("🚀 Servidor corriendo en http://localhost:3000");
-});
+start();
