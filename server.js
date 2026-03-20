@@ -14,7 +14,7 @@ app.use(cors({
 app.use(express.json());
 
 // ─────────────────────────────────────────────
-// BASE DE DATOS
+// BASE DE DATOS tarea: usuarios y tareas
 // ─────────────────────────────────────────────
 const pool = mysql.createPool({
   host:               process.env.DB_HOST,
